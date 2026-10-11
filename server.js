@@ -368,9 +368,7 @@ route('GET', '/api/discover', (req) => {
     LIMIT 100`).all(me.id, me.id, me.id, me.id, me.city, me.college);
   const myInterests = new Set(JSON.parse(me.interests || '[]').map(s => s.toLowerCase()));
   const hasMeLocation = Number.isFinite(me.latitude) && Number.isFinite(me.longitude);
-  const cards = rows.filter(r => {
-    return true;
-  }).slice(0, 20).map(r => {
+  const cards = rows.slice(0, 20).map(r => {
     const p = publicProfile(r);
     if (hasMeLocation && Number.isFinite(r.latitude) && Number.isFinite(r.longitude)) p.distance_km = Math.round(distanceKm(me, r));
     p.shared_interests = p.interests.filter(i => myInterests.has(i.toLowerCase()));
