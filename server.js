@@ -5,6 +5,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
+if (fs.existsSync(path.join(__dirname, '.env'))) process.loadEnvFile(path.join(__dirname, '.env'));
+
 const PORT = process.env.PORT || 3000;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'campusmatch.db');
@@ -12,7 +14,51 @@ const PUBLIC = path.join(__dirname, 'public');
 const MIN_AGE = 18;
 const MAX_BODY = 1_000_000; // ~1MB (profile photo is sent as a small data URL)
 
-const db = new DatabaseSync(DB_FILE);
+const MYSQL_ENABLED = Boolean(process.env.MYSQL_HOST || process.env.MYSQL_URL);
+let mysqlPool;
+let db;
+if (MYSQL_ENABLED) {
+  const mysql = require('mysql2/promise');
+  const options = process.env.MYSQL_URL ? process.env.MYSQL_URL : {
+    host: process.env.MYSQL_HOST,
+    port: Number(process.env.MYSQL_PORT || 3306),
+    user: process.env.MYSQL_USER || 'root',
+    password: process.env.MYSQL_PASSWORD || '',
+    database: process.env.MYSQL_DATABASE || 'campusmatch',
+    ssl: process.env.MYSQL_SSL === 'true' ? {
+      rejectUnauthorized: true,
+      ...(process.env.MYSQL_SSL_CA ? { ca: process.env.MYSQL_SSL_CA.replace(/\\n/g, '\n') } : {}),
+    } : undefined,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    supportBigNumbers: true,
+    bigNumberStrings: false,
+    dateStrings: true,
+  };
+  mysqlPool = mysql.createPool(options);
+  db = {
+    prepare(sql) {
+      const statement = sql.replace(/INSERT OR IGNORE INTO/gi, 'INSERT IGNORE INTO')
+        .replace(/INSERT OR REPLACE INTO swipes/gi, 'INSERT INTO swipes');
+      const duplicateSwipe = /INSERT INTO swipes/i.test(statement);
+      return {
+        async get(...params) { const [rows] = await mysqlPool.execute(statement, params); return rows[0]; },
+        async all(...params) { const [rows] = await mysqlPool.execute(statement, params); return rows; },
+        async run(...params) {
+          const sql = duplicateSwipe ? statement + ' ON DUPLICATE KEY UPDATE liked = VALUES(liked), created_at = VALUES(created_at)' : statement;
+          const [result] = await mysqlPool.execute(sql, params);
+          return { lastInsertRowid: Number(result.insertId || 0), changes: result.affectedRows || 0 };
+        },
+      };
+    },
+  };
+} else {
+  db = new DatabaseSync(DB_FILE);
+}
+
+let databaseReady = Promise.resolve();
+if (!MYSQL_ENABLED) {
 db.exec(`
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -96,6 +142,54 @@ for (const [name, definition] of Object.entries({ photos: "TEXT DEFAULT '[]'", h
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL');
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL');
+} else {
+  const schema = [
+    `CREATE TABLE IF NOT EXISTS users (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(191) NOT NULL UNIQUE, phone VARCHAR(24) NULL UNIQUE, google_sub VARCHAR(191) NULL UNIQUE,
+      salt CHAR(32) NOT NULL, pass_hash CHAR(128) NOT NULL, name VARCHAR(50) NOT NULL, dob DATE NOT NULL,
+      gender VARCHAR(20) NOT NULL, interested_in VARCHAR(20) NOT NULL, college VARCHAR(100) NOT NULL,
+      city VARCHAR(60) NOT NULL, year VARCHAR(30) NOT NULL, course VARCHAR(80) NOT NULL DEFAULT '',
+      bio VARCHAR(400) NOT NULL DEFAULT '', interests TEXT NOT NULL, hobbies TEXT NOT NULL,
+      photo MEDIUMTEXT NOT NULL, photos MEDIUMTEXT NOT NULL, latitude DOUBLE NULL, longitude DOUBLE NULL,
+      min_age INT NOT NULL DEFAULT 18, max_age INT NOT NULL DEFAULT 40, radius_km INT NOT NULL DEFAULT 100,
+      created_at BIGINT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS sessions (
+      token CHAR(64) PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, created_at BIGINT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS oauth_tickets (
+      ticket CHAR(64) PRIMARY KEY, email VARCHAR(191) NOT NULL, name VARCHAR(50) NOT NULL,
+      google_sub VARCHAR(191) NOT NULL, expires_at BIGINT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS swipes (
+      from_id BIGINT UNSIGNED NOT NULL, to_id BIGINT UNSIGNED NOT NULL, liked TINYINT NOT NULL, created_at BIGINT NOT NULL,
+      PRIMARY KEY (from_id, to_id), FOREIGN KEY (from_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (to_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS matches (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, a BIGINT UNSIGNED NOT NULL, b BIGINT UNSIGNED NOT NULL,
+      created_at BIGINT NOT NULL, UNIQUE KEY idx_matches_pair (a, b),
+      FOREIGN KEY (a) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (b) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS messages (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, match_id BIGINT UNSIGNED NOT NULL,
+      sender_id BIGINT UNSIGNED NOT NULL, body VARCHAR(1000) NOT NULL, created_at BIGINT NOT NULL,
+      KEY idx_msg_match (match_id, id), FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE,
+      FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS blocks (
+      blocker BIGINT UNSIGNED NOT NULL, blocked BIGINT UNSIGNED NOT NULL, PRIMARY KEY (blocker, blocked),
+      FOREIGN KEY (blocker) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (blocked) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS reports (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, reporter BIGINT UNSIGNED NOT NULL,
+      reported BIGINT UNSIGNED NOT NULL, reason VARCHAR(500) NOT NULL, created_at BIGINT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  ];
+  databaseReady = (async () => { for (const sql of schema) await mysqlPool.query(sql); })();
+}
 
 // ---------- helpers ----------
 const now = () => Date.now();
@@ -241,21 +335,21 @@ function wantsMe(other, me) { // does 'other' want to see 'me'?
 }
 
 // ---------- auth ----------
-function getUser(req) {
+async function getUser(req) {
   const h = req.headers.authorization || '';
   const token = h.startsWith('Bearer ') ? h.slice(7) : '';
   if (!token) return null;
-  const row = db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?').get(token);
+  const row = await db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?').get(token);
   return row || null;
 }
-function requireUser(req) {
-  const u = getUser(req);
+async function requireUser(req) {
+  const u = await getUser(req);
   if (!u) throw new HttpError(401, 'Please log in.');
   return u;
 }
-function newSession(userId) {
+async function newSession(userId) {
   const token = crypto.randomBytes(32).toString('hex');
-  db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?,?,?)').run(token, userId, now());
+  await db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?,?,?)').run(token, userId, now());
   return token;
 }
 
@@ -263,10 +357,10 @@ function newSession(userId) {
 const routes = [];
 const route = (method, pattern, handler) => routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), handler });
 
-route('POST', '/api/signup', (req, body, _p, ip) => {
+route('POST', '/api/signup', async (req, body, _p, ip) => {
   rateLimit('signup:' + ip, 10, 3600_000);
   let social = null;
-  if (body.google_ticket) social = db.prepare('SELECT * FROM oauth_tickets WHERE ticket = ? AND expires_at > ?').get(clean(body.google_ticket, 100), now());
+  if (body.google_ticket) social = await db.prepare('SELECT * FROM oauth_tickets WHERE ticket = ? AND expires_at > ?').get(clean(body.google_ticket, 100), now());
   if (body.google_ticket && !social) throw new HttpError(401, 'Google sign-in expired. Please try again.');
   const rawEmail = (social?.email || clean(body.email, 120)).toLowerCase();
   const phone = clean(body.phone, 24).replace(/[\s().-]/g, '');
@@ -284,15 +378,15 @@ route('POST', '/api/signup', (req, body, _p, ip) => {
   if (age > 40) throw new HttpError(400, 'CampusMatch is for college students.');
   if (body.agreed !== true) throw new HttpError(400, 'Please accept the community guidelines.');
   const f = validateProfileFields({ ...body, name: clean(body.name || social?.name, 50) }, { requireAll: true });
-  if (db.prepare(`SELECT 1 FROM users WHERE email = ? OR (? <> '' AND phone = ?)`).get(email, phone, phone)) throw new HttpError(409, 'An account with this email or phone number already exists.');
+  if (await db.prepare(`SELECT 1 FROM users WHERE email = ? OR (? <> '' AND phone = ?)`).get(email, phone, phone)) throw new HttpError(409, 'An account with this email or phone number already exists.');
   const salt = crypto.randomBytes(16).toString('hex');
-  const r = db.prepare(`INSERT INTO users (email, phone, google_sub, salt, pass_hash, name, dob, gender, interested_in, college, city, year, course, bio, interests, hobbies, photo, photos, latitude, longitude, min_age, max_age, radius_km, created_at)
+  const r = await db.prepare(`INSERT INTO users (email, phone, google_sub, salt, pass_hash, name, dob, gender, interested_in, college, city, year, course, bio, interests, hobbies, photo, photos, latitude, longitude, min_age, max_age, radius_km, created_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
     email, phone || null, social?.google_sub || null, salt, hashPassword(password, salt), f.name, dob, f.gender, f.interested_in, f.college, f.city, f.year,
     f.course || '', f.bio || '', f.interests || '[]', f.hobbies || '[]', f.photo || '', f.photos || '[]', f.latitude ?? null, f.longitude ?? null, f.min_age, f.max_age, f.radius_km, now());
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid);
-  if (social) db.prepare('DELETE FROM oauth_tickets WHERE ticket = ?').run(social.ticket);
-  return { status: 201, data: { token: newSession(user.id), user: ownProfile(user) } };
+  const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid);
+  if (social) await db.prepare('DELETE FROM oauth_tickets WHERE ticket = ?').run(social.ticket);
+  return { status: 201, data: { token: await newSession(user.id), user: ownProfile(user) } };
 });
 
 route('GET', '/api/config', () => ({ data: { google_client_id: GOOGLE_CLIENT_ID } }));
@@ -310,55 +404,55 @@ route('POST', '/api/auth/google', async (_req, body, _p, ip) => {
   } catch { throw new HttpError(401, 'Google could not verify this sign-in. Please try again.'); }
   if (claims.aud !== GOOGLE_CLIENT_ID || claims.email_verified !== 'true' || !claims.sub || !claims.email) throw new HttpError(401, 'Google account verification failed.');
   const email = clean(claims.email, 120).toLowerCase();
-  const user = db.prepare('SELECT * FROM users WHERE google_sub = ? OR lower(email) = ?').get(claims.sub, email);
+    const user = await db.prepare('SELECT * FROM users WHERE google_sub = ? OR lower(email) = ?').get(claims.sub, email);
   if (user) {
-    if (!user.google_sub) db.prepare('UPDATE users SET google_sub = ? WHERE id = ?').run(claims.sub, user.id);
-    const current = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-    return { data: { token: newSession(user.id), user: ownProfile(current) } };
+    if (!user.google_sub) await db.prepare('UPDATE users SET google_sub = ? WHERE id = ?').run(claims.sub, user.id);
+    const current = await db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+    return { data: { token: await newSession(user.id), user: ownProfile(current) } };
   }
   const ticket = crypto.randomBytes(32).toString('hex');
-  db.prepare('INSERT INTO oauth_tickets (ticket,email,name,google_sub,expires_at) VALUES (?,?,?,?,?)').run(ticket, email, clean(claims.name || email.split('@')[0], 50), claims.sub, now() + 10 * 60_000);
+  await db.prepare('INSERT INTO oauth_tickets (ticket,email,name,google_sub,expires_at) VALUES (?,?,?,?,?)').run(ticket, email, clean(claims.name || email.split('@')[0], 50), claims.sub, now() + 10 * 60_000);
   return { data: { ticket, email, name: clean(claims.name || '', 50), needs_profile: true } };
 });
 
-route('POST', '/api/login', (req, body, _p, ip) => {
+route('POST', '/api/login', async (req, body, _p, ip) => {
   rateLimit('login:' + ip, 20, 600_000);
   const identifier = clean(body.identifier || body.email, 120).toLowerCase();
   const phone = identifier.replace(/[\s().-]/g, '');
-  const user = db.prepare('SELECT * FROM users WHERE lower(email) = ? OR phone = ?').get(identifier, phone);
+  const user = await db.prepare('SELECT * FROM users WHERE lower(email) = ? OR phone = ?').get(identifier, phone);
   const ok = user && crypto.timingSafeEqual(Buffer.from(hashPassword(String(body.password || ''), user.salt), 'hex'), Buffer.from(user.pass_hash, 'hex'));
   if (!ok) throw new HttpError(401, 'Incorrect email or password.');
-  return { data: { token: newSession(user.id), user: ownProfile(user) } };
+  return { data: { token: await newSession(user.id), user: ownProfile(user) } };
 });
 
-route('POST', '/api/logout', (req) => {
+route('POST', '/api/logout', async (req) => {
   const h = req.headers.authorization || '';
-  if (h.startsWith('Bearer ')) db.prepare('DELETE FROM sessions WHERE token = ?').run(h.slice(7));
+  if (h.startsWith('Bearer ')) await db.prepare('DELETE FROM sessions WHERE token = ?').run(h.slice(7));
   return { data: { ok: true } };
 });
 
-route('GET', '/api/me', (req) => ({ data: { user: ownProfile(requireUser(req)) } }));
+route('GET', '/api/me', async (req) => ({ data: { user: ownProfile(await requireUser(req)) } }));
 
-route('PUT', '/api/me', (req, body) => {
-  const u = requireUser(req);
+route('PUT', '/api/me', async (req, body) => {
+  const u = await requireUser(req);
   const f = validateProfileFields(body, { requireAll: false });
   if ((f.min_age ?? u.min_age) > (f.max_age ?? u.max_age)) throw new HttpError(400, 'Minimum age cannot exceed maximum age.');
   const keys = Object.keys(f);
   if (keys.length) {
-    db.prepare(`UPDATE users SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => f[k]), u.id);
+    await db.prepare(`UPDATE users SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => f[k]), u.id);
   }
-  return { data: { user: ownProfile(db.prepare('SELECT * FROM users WHERE id = ?').get(u.id)) } };
+  return { data: { user: ownProfile(await db.prepare('SELECT * FROM users WHERE id = ?').get(u.id)) } };
 });
 
-route('DELETE', '/api/me', (req) => {
-  const u = requireUser(req);
-  db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
+route('DELETE', '/api/me', async (req) => {
+  const u = await requireUser(req);
+  await db.prepare('DELETE FROM users WHERE id = ?').run(u.id);
   return { data: { ok: true } };
 });
 
-route('GET', '/api/discover', (req) => {
-  const me = requireUser(req);
-  const rows = db.prepare(`
+route('GET', '/api/discover', async (req) => {
+  const me = await requireUser(req);
+  const rows = await db.prepare(`
     SELECT * FROM users u
     WHERE u.id != ?
       AND u.id NOT IN (SELECT to_id FROM swipes WHERE from_id = ?)
@@ -377,9 +471,9 @@ route('GET', '/api/discover', (req) => {
   return { data: { cards } };
 });
 
-route('GET', '/api/likes', (req) => {
-  const me = requireUser(req);
-  const rows = db.prepare(`
+route('GET', '/api/likes', async (req) => {
+  const me = await requireUser(req);
+  const rows = await db.prepare(`
     SELECT u.* FROM swipes s JOIN users u ON u.id = s.from_id
     WHERE s.to_id = ? AND s.liked = 1
       AND NOT EXISTS (SELECT 1 FROM swipes mine WHERE mine.from_id = ? AND mine.to_id = u.id)
@@ -401,31 +495,31 @@ route('GET', '/api/likes', (req) => {
   return { data: { cards } };
 });
 
-route('POST', '/api/swipe', (req, body) => {
-  const me = requireUser(req);
+route('POST', '/api/swipe', async (req, body) => {
+  const me = await requireUser(req);
   const to = Number(body.to);
   const liked = body.like === true ? 1 : 0;
   if (!Number.isInteger(to) || to === me.id) throw new HttpError(400, 'Invalid profile.');
-  const other = db.prepare('SELECT * FROM users WHERE id = ?').get(to);
+  const other = await db.prepare('SELECT * FROM users WHERE id = ?').get(to);
   if (!other) throw new HttpError(404, 'Profile not found.');
-  if (db.prepare('SELECT 1 FROM blocks WHERE (blocker=? AND blocked=?) OR (blocker=? AND blocked=?)').get(me.id, to, to, me.id)) throw new HttpError(403, 'Not available.');
-  db.prepare('INSERT OR REPLACE INTO swipes (from_id, to_id, liked, created_at) VALUES (?,?,?,?)').run(me.id, to, liked, now());
+  if (await db.prepare('SELECT 1 FROM blocks WHERE (blocker=? AND blocked=?) OR (blocker=? AND blocked=?)').get(me.id, to, to, me.id)) throw new HttpError(403, 'Not available.');
+  await db.prepare('INSERT OR REPLACE INTO swipes (from_id, to_id, liked, created_at) VALUES (?,?,?,?)').run(me.id, to, liked, now());
   let match = null;
   if (liked) {
-    const back = db.prepare('SELECT liked FROM swipes WHERE from_id = ? AND to_id = ?').get(to, me.id);
+    const back = await db.prepare('SELECT liked FROM swipes WHERE from_id = ? AND to_id = ?').get(to, me.id);
     if (back && back.liked) {
       const [a, b] = me.id < to ? [me.id, to] : [to, me.id];
-      db.prepare('INSERT OR IGNORE INTO matches (a, b, created_at) VALUES (?,?,?)').run(a, b, now());
-      const m = db.prepare('SELECT id FROM matches WHERE a = ? AND b = ?').get(a, b);
+      await db.prepare('INSERT OR IGNORE INTO matches (a, b, created_at) VALUES (?,?,?)').run(a, b, now());
+      const m = await db.prepare('SELECT id FROM matches WHERE a = ? AND b = ?').get(a, b);
       match = { id: m.id, user: publicProfile(other) };
     }
   }
   return { data: { match } };
 });
 
-route('GET', '/api/matches', (req) => {
-  const me = requireUser(req);
-  const rows = db.prepare(`
+route('GET', '/api/matches', async (req) => {
+  const me = await requireUser(req);
+  const rows = await db.prepare(`
     SELECT m.id AS match_id, m.created_at AS matched_at, u.*,
       (SELECT body FROM messages WHERE match_id = m.id ORDER BY id DESC LIMIT 1) AS last_body,
       (SELECT created_at FROM messages WHERE match_id = m.id ORDER BY id DESC LIMIT 1) AS last_at,
@@ -442,58 +536,58 @@ route('GET', '/api/matches', (req) => {
   })) } };
 });
 
-function getMatchFor(me, matchId) {
-  const m = db.prepare('SELECT * FROM matches WHERE id = ? AND (a = ? OR b = ?)').get(Number(matchId), me.id, me.id);
+async function getMatchFor(me, matchId) {
+  const m = await db.prepare('SELECT * FROM matches WHERE id = ? AND (a = ? OR b = ?)').get(Number(matchId), me.id, me.id);
   if (!m) throw new HttpError(404, 'Match not found.');
   const otherId = m.a === me.id ? m.b : m.a;
-  if (db.prepare('SELECT 1 FROM blocks WHERE (blocker=? AND blocked=?) OR (blocker=? AND blocked=?)').get(me.id, otherId, otherId, me.id)) throw new HttpError(403, 'This conversation is no longer available.');
+  if (await db.prepare('SELECT 1 FROM blocks WHERE (blocker=? AND blocked=?) OR (blocker=? AND blocked=?)').get(me.id, otherId, otherId, me.id)) throw new HttpError(403, 'This conversation is no longer available.');
   return m;
 }
 
-route('GET', '/api/matches/:id/messages', (req, _b, params, _ip, url) => {
-  const me = requireUser(req);
-  const m = getMatchFor(me, params.id);
+route('GET', '/api/matches/:id/messages', async (req, _b, params, _ip, url) => {
+  const me = await requireUser(req);
+  const m = await getMatchFor(me, params.id);
   const after = Number(url.searchParams.get('after')) || 0;
-  const rows = db.prepare('SELECT id, sender_id, body, created_at FROM messages WHERE match_id = ? AND id > ? ORDER BY id ASC LIMIT 200').all(m.id, after);
+  const rows = await db.prepare('SELECT id, sender_id, body, created_at FROM messages WHERE match_id = ? AND id > ? ORDER BY id ASC LIMIT 200').all(m.id, after);
   return { data: { messages: rows.map(r => ({ id: r.id, mine: r.sender_id === me.id, body: r.body, at: r.created_at })) } };
 });
 
-route('POST', '/api/matches/:id/messages', (req, body, params) => {
-  const me = requireUser(req);
-  const m = getMatchFor(me, params.id);
+route('POST', '/api/matches/:id/messages', async (req, body, params) => {
+  const me = await requireUser(req);
+  const m = await getMatchFor(me, params.id);
   rateLimit('msg:' + me.id, 60, 60_000);
   const text = clean(body.body, 1000);
   if (!text) throw new HttpError(400, 'Message is empty.');
-  const r = db.prepare('INSERT INTO messages (match_id, sender_id, body, created_at) VALUES (?,?,?,?)').run(m.id, me.id, text, now());
+  const r = await db.prepare('INSERT INTO messages (match_id, sender_id, body, created_at) VALUES (?,?,?,?)').run(m.id, me.id, text, now());
   const message = { id: Number(r.lastInsertRowid), sender_id: me.id, mine: true, body: text, at: now() };
-  publishChat(m.id, message);
+  await publishChat(m.id, message);
   return { status: 201, data: { message } };
 });
 
-route('POST', '/api/unmatch', (req, body) => {
-  const me = requireUser(req);
-  const m = getMatchFor(me, body.match_id);
-  db.prepare('DELETE FROM matches WHERE id = ?').run(m.id);
+route('POST', '/api/unmatch', async (req, body) => {
+  const me = await requireUser(req);
+  const m = await getMatchFor(me, body.match_id);
+  await db.prepare('DELETE FROM matches WHERE id = ?').run(m.id);
   return { data: { ok: true } };
 });
 
-route('POST', '/api/block', (req, body) => {
-  const me = requireUser(req);
+route('POST', '/api/block', async (req, body) => {
+  const me = await requireUser(req);
   const target = Number(body.user);
   if (!Number.isInteger(target) || target === me.id) throw new HttpError(400, 'Invalid user.');
-  db.prepare('INSERT OR IGNORE INTO blocks (blocker, blocked) VALUES (?,?)').run(me.id, target);
+  await db.prepare('INSERT OR IGNORE INTO blocks (blocker, blocked) VALUES (?,?)').run(me.id, target);
   return { data: { ok: true } };
 });
 
-route('POST', '/api/report', (req, body) => {
-  const me = requireUser(req);
+route('POST', '/api/report', async (req, body) => {
+  const me = await requireUser(req);
   rateLimit('report:' + me.id, 10, 3600_000);
   const target = Number(body.user);
   const reason = clean(body.reason, 500);
   if (!Number.isInteger(target) || target === me.id) throw new HttpError(400, 'Invalid user.');
   if (!reason) throw new HttpError(400, 'Please tell us what happened.');
-  db.prepare('INSERT INTO reports (reporter, reported, reason, created_at) VALUES (?,?,?,?)').run(me.id, target, reason, now());
-  db.prepare('INSERT OR IGNORE INTO blocks (blocker, blocked) VALUES (?,?)').run(me.id, target); // reporting also blocks
+  await db.prepare('INSERT INTO reports (reporter, reported, reason, created_at) VALUES (?,?,?,?)').run(me.id, target, reason, now());
+  await db.prepare('INSERT OR IGNORE INTO blocks (blocker, blocked) VALUES (?,?)').run(me.id, target); // reporting also blocks
   return { data: { ok: true } };
 });
 
@@ -562,25 +656,26 @@ function wsFrame(value) {
   if (data.length < 65536) { const head = Buffer.alloc(4); head[0] = 0x81; head[1] = 126; head.writeUInt16BE(data.length, 2); return Buffer.concat([head, data]); }
   const head = Buffer.alloc(10); head[0] = 0x81; head[1] = 127; head.writeBigUInt64BE(BigInt(data.length), 2); return Buffer.concat([head, data]);
 }
-function publishChat(matchId, message) {
-  const m = db.prepare('SELECT a, b FROM matches WHERE id = ?').get(matchId);
+async function publishChat(matchId, message) {
+  const m = await db.prepare('SELECT a, b FROM matches WHERE id = ?').get(matchId);
   if (!m) return;
   for (const userId of [m.a, m.b]) for (const socket of chatSockets.get(userId) || []) {
     if (socket.matchId === matchId && !socket.destroyed) socket.write(wsFrame({ type: 'message', message: { ...message, mine: socket.userId === message.sender_id } }));
   }
 }
-server.on('upgrade', (req, socket) => {
+server.on('upgrade', async (req, socket) => {
   try {
+    await databaseReady;
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname !== '/ws') return socket.destroy();
     const token = url.searchParams.get('token') || '';
-    const me = db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?').get(token);
+    const me = await db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?').get(token);
     if (!me) return socket.destroy();
     const matchId = Number(url.searchParams.get('match'));
-    const match = db.prepare('SELECT * FROM matches WHERE id=? AND (a=? OR b=?)').get(matchId, me.id, me.id);
+    const match = await db.prepare('SELECT * FROM matches WHERE id=? AND (a=? OR b=?)').get(matchId, me.id, me.id);
     if (!match) return socket.destroy();
     const otherId = match.a === me.id ? match.b : match.a;
-    if (db.prepare('SELECT 1 FROM blocks WHERE (blocker=? AND blocked=?) OR (blocker=? AND blocked=?)').get(me.id, otherId, otherId, me.id)) return socket.destroy();
+    if (await db.prepare('SELECT 1 FROM blocks WHERE (blocker=? AND blocked=?) OR (blocker=? AND blocked=?)').get(me.id, otherId, otherId, me.id)) return socket.destroy();
     const key = req.headers['sec-websocket-key'];
     if (!key || req.headers.upgrade?.toLowerCase() !== 'websocket') return socket.destroy();
     const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
@@ -588,7 +683,7 @@ server.on('upgrade', (req, socket) => {
     socket.userId = me.id; socket.matchId = matchId; socket.buffered = Buffer.alloc(0);
     if (!chatSockets.has(me.id)) chatSockets.set(me.id, new Set());
     chatSockets.get(me.id).add(socket);
-    socket.on('data', chunk => {
+    socket.on('data', async chunk => {
       socket.buffered = Buffer.concat([socket.buffered, chunk]);
       while (socket.buffered.length >= 2) {
         const first = socket.buffered[0], second = socket.buffered[1]; let length = second & 0x7f, offset = 2;
@@ -605,9 +700,9 @@ server.on('upgrade', (req, socket) => {
           const input = JSON.parse(payload.toString('utf8'));
           const body = clean(input.body, 1000); if (!body) continue;
           rateLimit('msg:' + me.id, 60, 60_000);
-          const result = db.prepare('INSERT INTO messages (match_id, sender_id, body, created_at) VALUES (?,?,?,?)').run(matchId, me.id, body, now());
+          const result = await db.prepare('INSERT INTO messages (match_id, sender_id, body, created_at) VALUES (?,?,?,?)').run(matchId, me.id, body, now());
           const message = { id: Number(result.lastInsertRowid), sender_id: me.id, body, at: now() };
-          publishChat(matchId, message);
+          await publishChat(matchId, message);
         } catch {}
       }
     });
@@ -617,7 +712,8 @@ server.on('upgrade', (req, socket) => {
 });
 
 if (require.main === module) {
-  server.listen(PORT, () => console.log(`CampusMatch running on http://localhost:${PORT}`));
+  databaseReady.then(() => server.listen(PORT, () => console.log(`CampusMatch running on http://localhost:${PORT}`)))
+    .catch(error => { console.error('Could not initialize database:', error.message); process.exitCode = 1; });
 }
 module.exports = server;
 

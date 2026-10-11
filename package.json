@@ -5,6 +5,7 @@
   "description": "Dating web app MVP for college students",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=22.13" }
+  "engines": { "node": ">=22.13" },
+  "dependencies": { "mysql2": "3.24.4" }
 }
 
