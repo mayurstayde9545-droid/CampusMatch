@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 10838)
-Total output lines: 768
-
 // CampusMatch - dating app for college students. Zero dependencies (Node 22+).
 const http = require('node:http');
 const fs = require('node:fs');
@@ -382,7 +379,49 @@ route('POST', '/api/signup', async (req, body, _p, ip) => {
   if (age > 40) throw new HttpError(400, 'CampusMatch is for college students.');
   if (body.agreed !== true) throw new HttpError(400, 'Please accept the community guidelines.');
   const f = validateProfileFields({ ...body, name: clean(body.name || social?.name, 50) }, { requireAll: true });
-  if (await db.prepare(`SELECT 1 FROM users WHERE email = ? OR (? <> '' AND phone = ?)`).get(email, phone, phone)) throw new HttpError(409…838 tokens truncated…ing(body.password || ''), user.salt), 'hex'), Buffer.from(user.pass_hash, 'hex'));
+  if (await db.prepare(`SELECT 1 FROM users WHERE email = ? OR (? <> '' AND phone = ?)`).get(email, phone, phone)) throw new HttpError(409, 'An account with this email or phone number already exists.');
+  const salt = crypto.randomBytes(16).toString('hex');
+  const r = await db.prepare(`INSERT INTO users (email, phone, google_sub, salt, pass_hash, name, dob, gender, interested_in, college, city, year, course, bio, interests, hobbies, photo, photos, latitude, longitude, min_age, max_age, radius_km, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    email, phone || null, social?.google_sub || null, salt, hashPassword(password, salt), f.name, dob, f.gender, f.interested_in, f.college, f.city, f.year,
+    f.course || '', f.bio || '', f.interests || '[]', f.hobbies || '[]', f.photo || '', f.photos || '[]', f.latitude ?? null, f.longitude ?? null, f.min_age, f.max_age, f.radius_km, now());
+  const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid);
+  if (social) await db.prepare('DELETE FROM oauth_tickets WHERE ticket = ?').run(social.ticket);
+  return { status: 201, data: { token: await newSession(user.id), user: ownProfile(user) } };
+});
+
+route('GET', '/api/config', () => ({ data: { google_client_id: GOOGLE_CLIENT_ID } }));
+
+route('POST', '/api/auth/google', async (_req, body, _p, ip) => {
+  rateLimit('google:' + ip, 15, 600_000);
+  if (!GOOGLE_CLIENT_ID) throw new HttpError(503, 'Google sign-in is not configured for this site.');
+  const credential = String(body.credential || '');
+  if (!credential || credential.length > 10_000) throw new HttpError(400, 'Invalid Google credential.');
+  let claims;
+  try {
+    const response = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(credential));
+    if (!response.ok) throw new Error('invalid token');
+    claims = await response.json();
+  } catch { throw new HttpError(401, 'Google could not verify this sign-in. Please try again.'); }
+  if (claims.aud !== GOOGLE_CLIENT_ID || claims.email_verified !== 'true' || !claims.sub || !claims.email) throw new HttpError(401, 'Google account verification failed.');
+  const email = clean(claims.email, 120).toLowerCase();
+    const user = await db.prepare('SELECT * FROM users WHERE google_sub = ? OR lower(email) = ?').get(claims.sub, email);
+  if (user) {
+    if (!user.google_sub) await db.prepare('UPDATE users SET google_sub = ? WHERE id = ?').run(claims.sub, user.id);
+    const current = await db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+    return { data: { token: await newSession(user.id), user: ownProfile(current) } };
+  }
+  const ticket = crypto.randomBytes(32).toString('hex');
+  await db.prepare('INSERT INTO oauth_tickets (ticket,email,name,google_sub,expires_at) VALUES (?,?,?,?,?)').run(ticket, email, clean(claims.name || email.split('@')[0], 50), claims.sub, now() + 10 * 60_000);
+  return { data: { ticket, email, name: clean(claims.name || '', 50), needs_profile: true } };
+});
+
+route('POST', '/api/login', async (req, body, _p, ip) => {
+  rateLimit('login:' + ip, 20, 600_000);
+  const identifier = clean(body.identifier || body.email, 120).toLowerCase();
+  const phone = identifier.replace(/[\s().-]/g, '');
+  const user = await db.prepare('SELECT * FROM users WHERE lower(email) = ? OR phone = ?').get(identifier, phone);
+  const ok = user && crypto.timingSafeEqual(Buffer.from(hashPassword(String(body.password || ''), user.salt), 'hex'), Buffer.from(user.pass_hash, 'hex'));
   if (!ok) throw new HttpError(401, 'Incorrect email or password.');
   return { data: { token: await newSession(user.id), user: ownProfile(user) } };
 });
@@ -726,4 +765,3 @@ if (require.main === module) {
     .catch(error => { console.error('Could not initialize database:', error.message); process.exitCode = 1; });
 }
 module.exports = server;
-
