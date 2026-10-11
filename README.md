@@ -57,4 +57,3 @@ Accounts and app data use SQLite by default or MySQL when configured; passwords 
 
 - `server.js`: API, database and static file server
 - `public/`: the website (`index.html`, `style.css`, `app.js`)
-
