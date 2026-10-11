@@ -102,6 +102,10 @@ a { color: inherit; }
 .actions .btn { min-width: 145px; }
 .actions .like { border-color: var(--green); color: white; background: var(--green); box-shadow: 0 3px 0 #193f33; }
 .actions .like:hover { background: #1d4e3e; }
+.swipe-exit-right { animation: swipeExitRight .42s cubic-bezier(.2,.75,.25,1) forwards; pointer-events: none; }
+.swipe-exit-left { animation: swipeExitLeft .42s cubic-bezier(.2,.75,.25,1) forwards; pointer-events: none; }
+@keyframes swipeExitRight { to { opacity: 0; transform: translate3d(125%, 10px, 0) rotate(18deg) scale(.88); filter: blur(2px); } }
+@keyframes swipeExitLeft { to { opacity: 0; transform: translate3d(-125%, 10px, 0) rotate(-18deg) scale(.88); filter: blur(2px); } }
 
 .likes-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
 .like-card-wrap { position: relative; min-width: 0; padding-bottom: 48px; }
@@ -210,10 +214,15 @@ textarea { min-height: 95px; resize: vertical; }
 .nav { margin-bottom: 4px; }
 .nav div { flex-wrap: wrap; }
 .nav button { margin-left: auto; color: var(--muted); }
-.overlay { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 18px; background: #211d20b8; backdrop-filter: blur(7px); }
-.overlay .box { display: grid; justify-items: center; gap: 15px; width: min(380px, 100%); padding: 34px 27px; border-radius: 25px; background: var(--white); text-align: center; box-shadow: 0 25px 90px #0003; }
+.overlay { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 18px; background: #211d20b8; backdrop-filter: blur(7px); animation: matchShade .2s ease-out both; }
+.overlay .box { display: grid; justify-items: center; gap: 15px; width: min(380px, 100%); padding: 34px 27px; border-radius: 25px; background: var(--white); text-align: center; box-shadow: 0 25px 90px #0003; animation: matchPop .48s cubic-bezier(.18,.9,.25,1.2) both; }
 .overlay .box h2 { font-size: 32px; }
 .overlay .box p { color: var(--muted); }
+.match-heart { display: grid; place-items: center; width: 76px; height: 76px; border-radius: 25px 25px 25px 7px; color: white; background: var(--coral); box-shadow: 0 10px 28px #e65c4f45; font-size: 52px; line-height: 1; animation: heartBeat .9s .35s ease-in-out both; }
+.match-kicker { color: var(--coral-dark); }
+@keyframes matchShade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes matchPop { from { opacity: 0; transform: translateY(24px) scale(.84); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes heartBeat { 0%,100% { transform: scale(1); } 35% { transform: scale(1.16) rotate(-5deg); } 65% { transform: scale(1.08) rotate(4deg); } }
 .toast { position: fixed; z-index: 30; top: 15px; left: 50%; max-width: 90vw; padding: 11px 17px; transform: translateX(-50%); border-radius: 30px; color: white; background: var(--ink); box-shadow: 0 8px 30px #0002; font-size: 12px; }
 
 @media (min-width: 1400px) { .shell { width: min(1220px, calc(100% - 100px)); } }
