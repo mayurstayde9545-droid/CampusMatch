@@ -254,6 +254,20 @@
         u.star_sign ? h('span', { class: 'card-zodiac' }, '✧ ' + u.star_sign) : null));
   }
 
+  function animateSwipeExit(element, liked) {
+    return new Promise(resolve => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        resolve();
+      };
+      element.addEventListener('animationend', finish, { once: true });
+      element.classList.add(liked ? 'swipe-exit-right' : 'swipe-exit-left');
+      window.setTimeout(finish, 500);
+    });
+  }
+
   async function viewDiscover() {
     const holder = h('div', {});
     shell(h('div', { class: 'page discover-page' },
@@ -303,8 +317,10 @@
       const u = state.cards[0];
       try {
         const r = await api('POST', '/swipe', { to: u.id, like });
+        await animateSwipeExit(card, like);
         state.cards.shift();
         if (r.match) showMatch(r.match);
+        else if (like) toast('Like sent — chat opens if they like you back.');
         if (state.cards.length < 3) { try { const more = await api('GET', '/discover'); const have = new Set(state.cards.map(c => c.id)); state.cards.push(...more.cards.filter(c => !have.has(c.id))); } catch {} }
       } catch (e) { toast(e.message); }
       busy = false;
@@ -318,9 +334,11 @@
     const close = () => ov.remove();
     const ov = h('div', { class: 'overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'New match' },
       h('div', { class: 'box' },
-        h('h2', {}, 'It is a match'),
-        h('p', {}, 'You and ' + match.user.name + ' liked each other.'),
-        h('a', { class: 'btn primary', href: '#/chat/' + match.id, onclick: close }, 'Send a message'),
+        h('span', { class: 'match-heart', 'aria-hidden': 'true' }, '♡'),
+        h('span', { class: 'eyebrow match-kicker' }, 'A MUTUAL LIKE'),
+        h('h2', {}, 'It is a match!'),
+        h('p', {}, 'You and ' + match.user.name + ' liked each other. Say hello and start getting to know them.'),
+        h('a', { class: 'btn primary', href: '#/chat/' + match.id, onclick: close }, '✦  Chat now'),
         h('button', { class: 'btn', type: 'button', onclick: close }, 'Keep swiping')));
     document.body.append(ov);
   }
@@ -342,17 +360,21 @@
         }
         for (const u of r.cards) {
           const card = idCard(u); card.classList.add('liked-card');
+          const wrap = h('div', { class: 'like-card-wrap' }, card);
           const actions = h('div', { class: 'like-card-actions' },
-            h('button', { class: 'round-action pass-action', type: 'button', 'aria-label': 'Pass on ' + u.name, onclick: () => decide(u, false) }, '×'),
-            h('button', { class: 'round-action like-action', type: 'button', 'aria-label': 'Like ' + u.name, onclick: () => decide(u, true) }, '♡'));
-          holder.append(h('div', { class: 'like-card-wrap' }, card, actions));
+            h('button', { class: 'round-action pass-action', type: 'button', 'aria-label': 'Pass on ' + u.name, onclick: () => decide(u, false, wrap) }, '×'),
+            h('button', { class: 'round-action like-action', type: 'button', 'aria-label': 'Like ' + u.name, onclick: () => decide(u, true, wrap) }, '♡'));
+          wrap.append(actions);
+          holder.append(wrap);
         }
       } catch (e) { holder.append(h('p', { class: 'error' }, e.message)); }
     }
-    async function decide(user, like) {
+    async function decide(user, like, wrap) {
       try {
         const r = await api('POST', '/swipe', { to: user.id, like });
+        await animateSwipeExit(wrap, like);
         if (r.match) showMatch(r.match);
+        else if (like) toast('Like sent — chat opens if they like you back.');
         await refresh();
       } catch (e) { toast(e.message); }
     }
