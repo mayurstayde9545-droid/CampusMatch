@@ -35,7 +35,8 @@ Keep `.env` private. It contains database credentials. When `MYSQL_HOST` is set,
 - Match when two people like each other
 - Private chat between matches (refreshes every 3 seconds)
 - Block and report (reporting also blocks)
-- Basic rate limits on login, sign up, messages and reports
+- Secure one-time password reset links (30-minute expiry) when Resend email settings are configured
+- Basic rate limits on login, sign up, password reset, messages and reports
 
 ## Not in the MVP yet
 
@@ -43,14 +44,14 @@ Keep `.env` private. It contains database credentials. When `MYSQL_HOST` is set,
 - SMS phone verification and other social providers (phone accounts use phone number plus password; Google OAuth requires a configured client ID)
 - Moderation tools: reports are saved in the `reports` table, but there is no admin screen
 - WebSocket chat and push notifications (the current chat polls for new messages)
-- Password reset and email confirmation
+- Email confirmation
 - HTTPS, which you need when you put it online (use a host that provides it, or put Caddy or nginx in front)
 
 ## Before you launch to real students
 
 Add college email verification and a way to review reports. Dating apps attract bad actors quickly, and these two things matter most for trust and safety. Also publish a privacy policy, since you are storing personal data.
 
-Accounts and app data use SQLite by default or MySQL when configured; passwords are scrypt hashed and sessions use random bearer tokens. Photos are stored as small image data URLs in the profile database. Discover shows other accounts not already swiped on or blocked, regardless of location. Chat uses WebSockets when available and falls back to three-second polling. For Google sign-in, set `GOOGLE_CLIENT_ID` to a Google OAuth web client ID before starting the server. Phone sign-in currently verifies the phone number and password but does not send an SMS code.
+Accounts and app data use SQLite by default or MySQL when configured; passwords are scrypt hashed and sessions use random bearer tokens. Photos are stored as small image data URLs in the profile database. Discover shows other accounts not already swiped on or blocked, regardless of location. Chat uses WebSockets when available and falls back to three-second polling. For Google sign-in, set `GOOGLE_CLIENT_ID` to a Google OAuth web client ID before starting the server. Phone sign-in currently verifies the phone number and password but does not send an SMS code. To enable forgot-password emails, configure `RESEND_API_KEY`, `RESEND_FROM_EMAIL` (a verified sender in Resend), and `APP_URL` (the public site URL) in the host's private environment settings. Until configured, the app shows a friendly contact-the-site-owner message and no SMTP error. Reset tokens are stored hashed, expire after 30 minutes, work once, and invalidate active sessions after a password change.
 
 ## Files
 
