@@ -242,14 +242,12 @@ function publicProfile(u) {
     bio: u.bio, interests: JSON.parse(u.interests || '[]'), photo: u.photo,
     photos: JSON.parse(u.photos || (u.photo ? JSON.stringify([u.photo]) : '[]')),
     hobbies: JSON.parse(u.hobbies || '[]'), star_sign: starSign(u.dob),
-    distance_km: null,
   };
 }
 function ownProfile(u) {
   return { ...publicProfile(u), email: u.email, dob: u.dob, interested_in: u.interested_in,
     phone: u.phone || '',
-    min_age: u.min_age, max_age: u.max_age, radius_km: u.radius_km,
-    has_location: Number.isFinite(u.latitude) && Number.isFinite(u.longitude) };
+    min_age: u.min_age, max_age: u.max_age };
 }
 
 // naive in-memory rate limiter
@@ -315,13 +313,6 @@ function validateProfileFields(b, { requireAll }) {
 }
 
 function ageWithin(u, other) { const age = ageFromDob(other.dob); return age >= u.min_age && age <= u.max_age; }
-function distanceKm(a, b) {
-  const rad = n => n * Math.PI / 180;
-  const dLat = rad(b.latitude - a.latitude), dLon = rad(b.longitude - a.longitude);
-  const x = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.latitude)) * Math.cos(rad(b.latitude)) * Math.sin(dLon / 2) ** 2;
-  return 6371 * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
-}
-
 function interestedClause(pref) {
   if (pref === 'women') return ['woman'];
   if (pref === 'men') return ['man'];
@@ -461,10 +452,8 @@ route('GET', '/api/discover', async (req) => {
     ORDER BY (u.city = ?) DESC, (u.college = ?) DESC, RANDOM()
     LIMIT 100`).all(me.id, me.id, me.id, me.id, me.city, me.college);
   const myInterests = new Set(JSON.parse(me.interests || '[]').map(s => s.toLowerCase()));
-  const hasMeLocation = Number.isFinite(me.latitude) && Number.isFinite(me.longitude);
   const cards = rows.slice(0, 20).map(r => {
     const p = publicProfile(r);
-    if (hasMeLocation && Number.isFinite(r.latitude) && Number.isFinite(r.longitude)) p.distance_km = Math.round(distanceKm(me, r));
     p.shared_interests = p.interests.filter(i => myInterests.has(i.toLowerCase()));
     return p;
   });
@@ -481,15 +470,12 @@ route('GET', '/api/likes', async (req) => {
       AND u.id NOT IN (SELECT blocker FROM blocks WHERE blocked = ?)
     ORDER BY s.created_at DESC LIMIT 60`).all(me.id, me.id, me.id, me.id);
   const myInterests = new Set(JSON.parse(me.interests || '[]').map(s => s.toLowerCase()));
-  const hasMeLocation = Number.isFinite(me.latitude) && Number.isFinite(me.longitude);
   const cards = rows.filter(u => {
     if (!genderWants(me).includes(u.gender) || !wantsMe(u, me) || !ageWithin(me, u) || !ageWithin(u, me)) return false;
-    if (hasMeLocation && Number.isFinite(u.latitude) && Number.isFinite(u.longitude) && distanceKm(me, u) > me.radius_km) return false;
     return true;
   }).map(u => {
     const p = publicProfile(u);
     p.shared_interests = p.interests.filter(i => myInterests.has(i.toLowerCase()));
-    if (hasMeLocation && Number.isFinite(u.latitude) && Number.isFinite(u.longitude)) p.distance_km = Math.round(distanceKm(me, u));
     return p;
   });
   return { data: { cards } };
