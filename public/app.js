@@ -182,13 +182,6 @@
       try { photoState.data = await Promise.all(files.map(optimizePhoto)); }
       catch (e) { photoInput.value = ''; photoState.data = []; toast(e.message); }
     });
-    let coords = {};
-    const locStatus = h('span', { class: 'hint' }, 'Location is optional. Use it to find people within your distance setting.');
-    const locButton = h('button', { class: 'btn small', type: 'button', onclick: () => {
-      if (!navigator.geolocation) { locStatus.textContent = 'Location is not available in this browser.'; return; }
-      locStatus.textContent = 'Requesting location permission…';
-      navigator.geolocation.getCurrentPosition(pos => { coords = { latitude: pos.coords.latitude, longitude: pos.coords.longitude }; locStatus.textContent = 'Location saved for distance based discovery.'; }, () => { locStatus.textContent = 'Location not shared. City based discovery will still work.'; }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
-    } }, 'Use my location');
     const form = h('form', { class: 'stack', onsubmit: async (e) => {
       e.preventDefault(); err.textContent = '';
       const f = form.elements;
@@ -197,10 +190,10 @@
           email: state.googleTicket ? state.googleEmail : f.email.value, phone: f.phone.value, password: f.password.value, google_ticket: state.googleTicket || undefined, dob: f.dob.value, name: f.name.value,
           gender: f.gender.value, interested_in: f.interested_in.value, college: f.college.value,
           city: f.city.value, year: f.year.value, bio: f.bio.value, agreed: f.agreed.checked,
-          min_age: f.min_age.value, max_age: f.max_age.value, radius_km: f.radius_km.value,
+          min_age: f.min_age.value, max_age: f.max_age.value,
           interests: f.interests.value.split(',').map(s => s.trim()).filter(Boolean),
           hobbies: f.hobbies.value.split(',').map(s => s.trim()).filter(Boolean),
-          photos: photoState.data, ...coords,
+          photos: photoState.data,
         });
         setSession(r.token, r.user);
         state.googleTicket = null;
@@ -223,11 +216,10 @@
       h('div', { class: 'two' },
         h('label', {}, 'Show ages from', h('input', { name: 'min_age', type: 'number', min: 18, max: 40, value: 18, required: true })),
         h('label', {}, 'To age', h('input', { name: 'max_age', type: 'number', min: 18, max: 40, value: 30, required: true }))),
-      h('label', {}, 'Maximum distance (km)', h('input', { name: 'radius_km', type: 'number', min: 1, max: 500, value: 100, required: true })),
       h('label', {}, 'Profile photos (up to 6, optional)', photoInput, h('span', { class: 'hint' }, 'Photos are resized automatically for your profile.')),
       h('label', {}, 'Interests (comma separated)', h('input', { name: 'interests', maxlength: 220, placeholder: 'music, hiking, chai' })),
       h('label', {}, 'Hobbies (comma separated)', h('input', { name: 'hobbies', maxlength: 260, placeholder: 'photography, football, baking' })),
-      h('div', { class: 'row' }, locButton, locStatus),
+      h('p', { class: 'hint' }, 'Browse profiles from anywhere.'),
       h('label', {}, 'About you', h('textarea', { name: 'bio', maxlength: 400, placeholder: 'Your favourite canteen order, what you are studying, what you want to talk about.' })),
       h('label', { class: 'check' }, h('input', { name: 'agreed', type: 'checkbox', required: true }),
         'I am 18 or older. I will be respectful, use my real details, and meet in public places first.'),
@@ -247,25 +239,11 @@
         h('span', { class: 'campus-pill' }, '✦  ' + u.college),
         h('div', { class: 'card-caption' },
           h('h2', {}, u.name, ' ', h('span', {}, u.age)),
-          h('p', {}, u.year + ' · ' + u.city, u.distance_km == null ? '' : ' · ' + u.distance_km + ' km away'))),
+          h('p', {}, u.year + ' · ' + u.city))),
       h('div', { class: 'idcard-body' },
         h('p', { class: 'bio' }, u.bio || 'Still writing their story.'),
         h('div', { class: 'interest-pills' }, tags.map(i => h('span', {}, i))),
         u.star_sign ? h('span', { class: 'card-zodiac' }, '✧ ' + u.star_sign) : null));
-  }
-
-  function animateSwipeExit(element, liked) {
-    return new Promise(resolve => {
-      let finished = false;
-      const finish = () => {
-        if (finished) return;
-        finished = true;
-        resolve();
-      };
-      element.addEventListener('animationend', finish, { once: true });
-      element.classList.add(liked ? 'swipe-exit-right' : 'swipe-exit-left');
-      window.setTimeout(finish, 500);
-    });
   }
 
   async function viewDiscover() {
@@ -317,10 +295,8 @@
       const u = state.cards[0];
       try {
         const r = await api('POST', '/swipe', { to: u.id, like });
-        await animateSwipeExit(card, like);
         state.cards.shift();
         if (r.match) showMatch(r.match);
-        else if (like) toast('Like sent — chat opens if they like you back.');
         if (state.cards.length < 3) { try { const more = await api('GET', '/discover'); const have = new Set(state.cards.map(c => c.id)); state.cards.push(...more.cards.filter(c => !have.has(c.id))); } catch {} }
       } catch (e) { toast(e.message); }
       busy = false;
@@ -334,11 +310,9 @@
     const close = () => ov.remove();
     const ov = h('div', { class: 'overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'New match' },
       h('div', { class: 'box' },
-        h('span', { class: 'match-heart', 'aria-hidden': 'true' }, '♡'),
-        h('span', { class: 'eyebrow match-kicker' }, 'A MUTUAL LIKE'),
-        h('h2', {}, 'It is a match!'),
-        h('p', {}, 'You and ' + match.user.name + ' liked each other. Say hello and start getting to know them.'),
-        h('a', { class: 'btn primary', href: '#/chat/' + match.id, onclick: close }, '✦  Chat now'),
+        h('h2', {}, 'It is a match'),
+        h('p', {}, 'You and ' + match.user.name + ' liked each other.'),
+        h('a', { class: 'btn primary', href: '#/chat/' + match.id, onclick: close }, 'Send a message'),
         h('button', { class: 'btn', type: 'button', onclick: close }, 'Keep swiping')));
     document.body.append(ov);
   }
@@ -360,21 +334,17 @@
         }
         for (const u of r.cards) {
           const card = idCard(u); card.classList.add('liked-card');
-          const wrap = h('div', { class: 'like-card-wrap' }, card);
           const actions = h('div', { class: 'like-card-actions' },
-            h('button', { class: 'round-action pass-action', type: 'button', 'aria-label': 'Pass on ' + u.name, onclick: () => decide(u, false, wrap) }, '×'),
-            h('button', { class: 'round-action like-action', type: 'button', 'aria-label': 'Like ' + u.name, onclick: () => decide(u, true, wrap) }, '♡'));
-          wrap.append(actions);
-          holder.append(wrap);
+            h('button', { class: 'round-action pass-action', type: 'button', 'aria-label': 'Pass on ' + u.name, onclick: () => decide(u, false) }, '×'),
+            h('button', { class: 'round-action like-action', type: 'button', 'aria-label': 'Like ' + u.name, onclick: () => decide(u, true) }, '♡'));
+          holder.append(h('div', { class: 'like-card-wrap' }, card, actions));
         }
       } catch (e) { holder.append(h('p', { class: 'error' }, e.message)); }
     }
-    async function decide(user, like, wrap) {
+    async function decide(user, like) {
       try {
         const r = await api('POST', '/swipe', { to: user.id, like });
-        await animateSwipeExit(wrap, like);
         if (r.match) showMatch(r.match);
-        else if (like) toast('Like sent — chat opens if they like you back.');
         await refresh();
       } catch (e) { toast(e.message); }
     }
@@ -527,8 +497,8 @@
           h('section', { class: 'profile-section' }, h('h3', {}, 'Interests'), interests),
           h('section', { class: 'profile-section' }, h('h3', {}, 'Hobbies'), hobbies),
           h('section', { class: 'preference-summary' }, h('span', { class: 'eyebrow' }, 'MY DISCOVERY SETTINGS'),
-            h('p', {}, 'Looking for ', h('b', {}, lookingNames[user.interested_in] || 'Everyone'), ' · ages ', h('b', {}, user.min_age + '–' + user.max_age), ' · within ', h('b', {}, user.radius_km + ' km')),
-            h('small', {}, user.has_location ? 'Nearby discovery is turned on.' : 'Share your location to see distance-based suggestions.')),
+            h('p', {}, 'Looking for ', h('b', {}, lookingNames[user.interested_in] || 'Everyone'), ' · ages ', h('b', {}, user.min_age + '–' + user.max_age)),
+            h('small', {}, 'Browse profiles from anywhere.')),
           h('a', { class: 'btn primary profile-edit-button', href: '#/profile/edit' }, 'Edit profile', h('span', {}, '↗'))));
       wrap.append(preview);
     } catch (e) { wrap.append(h('p', { class: 'error' }, e.message)); }
@@ -558,7 +528,7 @@
         try {
           const r = await api('PUT', '/me', { name: f.name.value, gender: f.gender.value, interested_in: f.interested_in.value,
             college: f.college.value, city: f.city.value, year: f.year.value, bio: f.bio.value,
-            min_age: f.min_age.value, max_age: f.max_age.value, radius_km: f.radius_km.value,
+            min_age: f.min_age.value, max_age: f.max_age.value,
             interests: f.interests.value.split(',').map(s => s.trim()).filter(Boolean),
             hobbies: f.hobbies.value.split(',').map(s => s.trim()).filter(Boolean), photos });
           state.user = r.user; toast('Profile saved.'); location.hash = '#/profile';
@@ -570,12 +540,11 @@
         field('College', 'college', user.college, { maxlength: 100, required: true }),
         h('div', { class: 'two' }, field('City', 'city', user.city, { maxlength: 60, required: true }), field('Year', 'year', user.year, { maxlength: 30, required: true })),
         h('div', { class: 'two' }, field('Minimum age', 'min_age', user.min_age, { type: 'number', min: 18, max: 40, required: true }), field('Maximum age', 'max_age', user.max_age, { type: 'number', min: 18, max: 40, required: true })),
-        field('Maximum distance (km)', 'radius_km', user.radius_km, { type: 'number', min: 1, max: 500, required: true }),
         h('label', {}, 'Profile photos (up to 6)', photoInput, h('span', { class: 'hint' }, 'Selecting new photos replaces the current gallery. They are resized automatically.')),
         field('Interests (comma separated)', 'interests', (user.interests || []).join(', '), { maxlength: 220 }),
         field('Hobbies (comma separated)', 'hobbies', (user.hobbies || []).join(', '), { maxlength: 260 }),
         h('label', {}, 'About you', h('textarea', { name: 'bio', maxlength: 400 }, user.bio || '')),
-        user.has_location ? h('p', { class: 'hint' }, 'Your location is enabled for nearby discovery.') : h('p', { class: 'hint' }, 'Location is not set. Discovery will prioritize your city and college.'),
+        h('p', { class: 'hint' }, 'Browse profiles from anywhere.'),
         err, h('button', { class: 'btn primary', type: 'submit' }, 'Save profile'));
       wrap.append(form);
     } catch (e) { wrap.append(h('p', { class: 'error' }, e.message)); }
