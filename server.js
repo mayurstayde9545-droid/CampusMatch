@@ -358,23 +358,18 @@ route('DELETE', '/api/me', (req) => {
 
 route('GET', '/api/discover', (req) => {
   const me = requireUser(req);
-  const wants = genderWants(me);
   const rows = db.prepare(`
     SELECT * FROM users u
     WHERE u.id != ?
-      AND u.gender IN (${wants.map(() => '?').join(',')})
       AND u.id NOT IN (SELECT to_id FROM swipes WHERE from_id = ?)
       AND u.id NOT IN (SELECT blocked FROM blocks WHERE blocker = ?)
       AND u.id NOT IN (SELECT blocker FROM blocks WHERE blocked = ?)
-      AND CAST((julianday('now') - julianday(u.dob)) / 365.2425 AS INTEGER) BETWEEN ? AND ?
     ORDER BY (u.city = ?) DESC, (u.college = ?) DESC, RANDOM()
-    LIMIT 100`).all(me.id, ...wants, me.id, me.id, me.id, me.min_age, me.max_age, me.city, me.college);
+    LIMIT 100`).all(me.id, me.id, me.id, me.id, me.city, me.college);
   const myInterests = new Set(JSON.parse(me.interests || '[]').map(s => s.toLowerCase()));
   const hasMeLocation = Number.isFinite(me.latitude) && Number.isFinite(me.longitude);
   const cards = rows.filter(r => {
-    if (!wantsMe(r, me) || !ageWithin(r, me)) return false;
-    const hasOtherLocation = Number.isFinite(r.latitude) && Number.isFinite(r.longitude);
-    return !hasMeLocation || !hasOtherLocation || distanceKm(me, r) <= me.radius_km;
+    return true;
   }).slice(0, 20).map(r => {
     const p = publicProfile(r);
     if (hasMeLocation && Number.isFinite(r.latitude) && Number.isFinite(r.longitude)) p.distance_km = Math.round(distanceKm(me, r));
