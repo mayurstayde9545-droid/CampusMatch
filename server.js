@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 10838)
+Total output lines: 768
+
 // CampusMatch - dating app for college students. Zero dependencies (Node 22+).
 const http = require('node:http');
 const fs = require('node:fs');
@@ -9,6 +12,9 @@ if (fs.existsSync(path.join(__dirname, '.env'))) process.loadEnvFile(path.join(_
 
 const PORT = process.env.PORT || 3000;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || '';
+const APP_URL = (process.env.APP_URL || '').replace(/\/$/, '');
 const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'campusmatch.db');
 const PUBLIC = path.join(__dirname, 'public');
 const MIN_AGE = 18;
@@ -97,6 +103,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS oauth_tickets (
   ticket TEXT PRIMARY KEY, email TEXT NOT NULL, name TEXT NOT NULL, google_sub TEXT NOT NULL, expires_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL, used_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS swipes (
   from_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   to_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -162,6 +171,10 @@ db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_
     `CREATE TABLE IF NOT EXISTS oauth_tickets (
       ticket CHAR(64) PRIMARY KEY, email VARCHAR(191) NOT NULL, name VARCHAR(50) NOT NULL,
       google_sub VARCHAR(191) NOT NULL, expires_at BIGINT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    `CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      token_hash CHAR(64) PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, expires_at BIGINT NOT NULL, used_at BIGINT NULL,
+      KEY idx_reset_user (user_id), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
     `CREATE TABLE IF NOT EXISTS swipes (
       from_id BIGINT UNSIGNED NOT NULL, to_id BIGINT UNSIGNED NOT NULL, liked TINYINT NOT NULL, created_at BIGINT NOT NULL,
@@ -369,51 +382,62 @@ route('POST', '/api/signup', async (req, body, _p, ip) => {
   if (age > 40) throw new HttpError(400, 'CampusMatch is for college students.');
   if (body.agreed !== true) throw new HttpError(400, 'Please accept the community guidelines.');
   const f = validateProfileFields({ ...body, name: clean(body.name || social?.name, 50) }, { requireAll: true });
-  if (await db.prepare(`SELECT 1 FROM users WHERE email = ? OR (? <> '' AND phone = ?)`).get(email, phone, phone)) throw new HttpError(409, 'An account with this email or phone number already exists.');
-  const salt = crypto.randomBytes(16).toString('hex');
-  const r = await db.prepare(`INSERT INTO users (email, phone, google_sub, salt, pass_hash, name, dob, gender, interested_in, college, city, year, course, bio, interests, hobbies, photo, photos, latitude, longitude, min_age, max_age, radius_km, created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-    email, phone || null, social?.google_sub || null, salt, hashPassword(password, salt), f.name, dob, f.gender, f.interested_in, f.college, f.city, f.year,
-    f.course || '', f.bio || '', f.interests || '[]', f.hobbies || '[]', f.photo || '', f.photos || '[]', f.latitude ?? null, f.longitude ?? null, f.min_age, f.max_age, f.radius_km, now());
-  const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid);
-  if (social) await db.prepare('DELETE FROM oauth_tickets WHERE ticket = ?').run(social.ticket);
-  return { status: 201, data: { token: await newSession(user.id), user: ownProfile(user) } };
-});
-
-route('GET', '/api/config', () => ({ data: { google_client_id: GOOGLE_CLIENT_ID } }));
-
-route('POST', '/api/auth/google', async (_req, body, _p, ip) => {
-  rateLimit('google:' + ip, 15, 600_000);
-  if (!GOOGLE_CLIENT_ID) throw new HttpError(503, 'Google sign-in is not configured for this site.');
-  const credential = String(body.credential || '');
-  if (!credential || credential.length > 10_000) throw new HttpError(400, 'Invalid Google credential.');
-  let claims;
-  try {
-    const response = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(credential));
-    if (!response.ok) throw new Error('invalid token');
-    claims = await response.json();
-  } catch { throw new HttpError(401, 'Google could not verify this sign-in. Please try again.'); }
-  if (claims.aud !== GOOGLE_CLIENT_ID || claims.email_verified !== 'true' || !claims.sub || !claims.email) throw new HttpError(401, 'Google account verification failed.');
-  const email = clean(claims.email, 120).toLowerCase();
-    const user = await db.prepare('SELECT * FROM users WHERE google_sub = ? OR lower(email) = ?').get(claims.sub, email);
-  if (user) {
-    if (!user.google_sub) await db.prepare('UPDATE users SET google_sub = ? WHERE id = ?').run(claims.sub, user.id);
-    const current = await db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
-    return { data: { token: await newSession(user.id), user: ownProfile(current) } };
-  }
-  const ticket = crypto.randomBytes(32).toString('hex');
-  await db.prepare('INSERT INTO oauth_tickets (ticket,email,name,google_sub,expires_at) VALUES (?,?,?,?,?)').run(ticket, email, clean(claims.name || email.split('@')[0], 50), claims.sub, now() + 10 * 60_000);
-  return { data: { ticket, email, name: clean(claims.name || '', 50), needs_profile: true } };
-});
-
-route('POST', '/api/login', async (req, body, _p, ip) => {
-  rateLimit('login:' + ip, 20, 600_000);
-  const identifier = clean(body.identifier || body.email, 120).toLowerCase();
-  const phone = identifier.replace(/[\s().-]/g, '');
-  const user = await db.prepare('SELECT * FROM users WHERE lower(email) = ? OR phone = ?').get(identifier, phone);
-  const ok = user && crypto.timingSafeEqual(Buffer.from(hashPassword(String(body.password || ''), user.salt), 'hex'), Buffer.from(user.pass_hash, 'hex'));
+  if (await db.prepare(`SELECT 1 FROM users WHERE email = ? OR (? <> '' AND phone = ?)`).get(email, phone, phone)) throw new HttpError(409…838 tokens truncated…ing(body.password || ''), user.salt), 'hex'), Buffer.from(user.pass_hash, 'hex'));
   if (!ok) throw new HttpError(401, 'Incorrect email or password.');
   return { data: { token: await newSession(user.id), user: ownProfile(user) } };
+});
+
+route('POST', '/api/password/forgot', async (_req, body, _p, ip) => {
+  rateLimit('password-forgot:' + ip, 6, 15 * 60_000);
+  const email = clean(body.email, 120).toLowerCase();
+  const validEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
+  if (!RESEND_API_KEY || !RESEND_FROM_EMAIL || !APP_URL) return { data: { enabled: false } };
+  if (validEmail) {
+    const user = await db.prepare("SELECT id FROM users WHERE lower(email) = ? AND email NOT LIKE 'phone.%@phone.campusmatch.invalid'").get(email);
+    if (user) {
+      const token = crypto.randomBytes(32).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+      await db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ? OR expires_at < ?').run(user.id, now());
+      await db.prepare('INSERT INTO password_reset_tokens (token_hash, user_id, expires_at, used_at) VALUES (?,?,?,NULL)')
+        .run(tokenHash, user.id, now() + 30 * 60_000);
+      const link = APP_URL + '/#/reset-password?token=' + token;
+      try {
+        const response = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            from: RESEND_FROM_EMAIL,
+            to: [email],
+            subject: 'Reset your CampusMatch password',
+            html: `<p>We received a request to reset your CampusMatch password.</p><p><a href="${link}">Choose a new password</a></p><p>This link expires in 30 minutes and can only be used once. If you did not request this, you can ignore this email.</p>`,
+          }),
+        });
+        if (!response.ok) throw new Error('Email provider rejected reset message');
+      } catch {
+        console.error('Password recovery email could not be sent. Check the email provider settings.');
+        await db.prepare('DELETE FROM password_reset_tokens WHERE token_hash = ?').run(tokenHash);
+      }
+    }
+  }
+  return { data: { enabled: true, message: 'If an account uses that email, a password reset link will arrive shortly.' } };
+});
+
+route('POST', '/api/password/reset', async (_req, body, _p, ip) => {
+  rateLimit('password-reset:' + ip, 10, 15 * 60_000);
+  const token = clean(body.token, 128);
+  const password = String(body.password || '');
+  if (!/^[a-f0-9]{64}$/.test(token)) throw new HttpError(400, 'This reset link is invalid or expired. Request a new one.');
+  if (password.length < 8 || password.length > 200) throw new HttpError(400, 'Password must be at least 8 characters.');
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const reset = await db.prepare('SELECT user_id FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?').get(tokenHash, now());
+  if (!reset) throw new HttpError(400, 'This reset link is invalid or expired. Request a new one.');
+  const used = await db.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?').run(now(), tokenHash, now());
+  if (!used.changes) throw new HttpError(400, 'This reset link is invalid or expired. Request a new one.');
+  const salt = crypto.randomBytes(16).toString('hex');
+  await db.prepare('UPDATE users SET salt = ?, pass_hash = ? WHERE id = ?').run(salt, hashPassword(password, salt), reset.user_id);
+  await db.prepare('DELETE FROM sessions WHERE user_id = ?').run(reset.user_id);
+  await db.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').run(reset.user_id);
+  return { data: { ok: true } };
 });
 
 route('POST', '/api/logout', async (req) => {
