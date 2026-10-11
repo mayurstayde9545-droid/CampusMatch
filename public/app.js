@@ -158,9 +158,47 @@
       h('label', {}, 'Password', h('input', { name: 'password', type: 'password', autocomplete: 'current-password', required: true })),
       err,
       h('button', { class: 'btn primary', type: 'submit' }, 'Log in'),
+      h('p', { class: 'hint' }, h('a', { href: '#/forgot-password' }, 'Forgot password?')),
       h('p', { class: 'hint' }, 'New here? ', h('a', { href: '#/signup' }, 'Create your profile')));
     shell(h('div', {}, h('h2', {}, 'Log in'), social, form));
     googleSignIn(social);
+  }
+
+  function viewForgotPassword() {
+    const status = h('p', { class: 'hint', role: 'status' });
+    const err = h('p', { class: 'error', role: 'alert' });
+    const form = h('form', { class: 'stack', onsubmit: async e => {
+      e.preventDefault(); err.textContent = ''; status.textContent = '';
+      try {
+        const r = await api('POST', '/password/forgot', { email: form.email.value });
+        status.textContent = r.enabled ? r.message : 'Password recovery is not set up on this site yet. Please contact the site owner for help.';
+        if (r.enabled) form.reset();
+      } catch (ex) { err.textContent = ex.message; }
+    } },
+      h('label', {}, 'Email address', h('input', { name: 'email', type: 'email', autocomplete: 'email', required: true, placeholder: 'you@example.com' })),
+      err, status, h('button', { class: 'btn primary', type: 'submit' }, 'Send reset link'),
+      h('p', { class: 'hint' }, h('a', { href: '#/login' }, 'Back to log in')));
+    shell(h('div', {}, h('h2', {}, 'Reset your password'), h('p', { class: 'hint' }, 'Enter the email address on your account and we’ll send a secure reset link.'), form));
+  }
+
+  function viewResetPassword(token) {
+    const status = h('p', { class: 'hint', role: 'status' });
+    const err = h('p', { class: 'error', role: 'alert' });
+    const form = h('form', { class: 'stack', onsubmit: async e => {
+      e.preventDefault(); err.textContent = ''; status.textContent = '';
+      if (form.password.value !== form.confirm.value) { err.textContent = 'Those passwords do not match.'; return; }
+      try {
+        await api('POST', '/password/reset', { token, password: form.password.value });
+        status.textContent = 'Password changed. You can now log in with your new password.';
+        form.reset();
+        setTimeout(() => { location.hash = '#/login'; route(); }, 1200);
+      } catch (ex) { err.textContent = ex.message; }
+    } },
+      h('label', {}, 'New password', h('input', { name: 'password', type: 'password', minlength: 8, maxlength: 200, autocomplete: 'new-password', required: true })),
+      h('label', {}, 'Confirm new password', h('input', { name: 'confirm', type: 'password', minlength: 8, maxlength: 200, autocomplete: 'new-password', required: true })),
+      err, status, h('button', { class: 'btn primary', type: 'submit' }, 'Save new password'),
+      h('p', { class: 'hint' }, h('a', { href: '#/forgot-password' }, 'Request another reset link')));
+    shell(h('div', {}, h('h2', {}, 'Choose a new password'), form));
   }
 
   const COLLEGES = ['IIT Bombay', 'IIT Delhi', 'IIT Madras', 'NIT Trichy', 'BITS Pilani', 'Delhi University', 'Fergusson College', 'COEP Pune', 'Christ University', 'Symbiosis Pune', 'Mumbai University', 'Anna University', 'VIT Vellore', 'Manipal University', 'JNU', 'Jadavpur University'];
@@ -553,7 +591,11 @@
   // ---------- router ----------
   function route() {
     if (cleanup) { cleanup(); cleanup = null; }
-    const parts = location.hash.replace(/^#/, '').split('/').filter(Boolean);
+    const hashRoute = location.hash.replace(/^#/, '');
+    const [routePath, routeQuery = ''] = hashRoute.split('?');
+    const parts = routePath.split('/').filter(Boolean);
+    if (parts[0] === 'reset-password') { const token = new URLSearchParams(routeQuery).get('token') || ''; return viewResetPassword(token); }
+    if (parts[0] === 'forgot-password') return viewForgotPassword();
     if (!state.user) {
       if (parts[0] === 'login') return viewLogin();
       if (parts[0] === 'signup') return viewSignup();
